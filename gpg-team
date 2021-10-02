@@ -1,0 +1,174 @@
+#!/bin/bash
+
+helptext() {
+      cat <<EOF
+(re)encrypt files using gpg.
+
+Usage:
+  gpg-team
+
+Options:
+  --encrypt [recipients-file] [file]    Encrypt single file. 
+  --reencrypt [recipients-file] [file]  Re-encrypt single file. 
+  --reencrypt-all [recipients-file]     Re-encrypt all gpg files in directory. 
+  -h                                    Show this help message.
+EOF
+}
+
+[[ $@ ]] || { helptext; exit 1; }
+
+[[ -z "$2" ]] && echo "please select recipients file" && exit
+
+ARG=()
+while [[ $# -gt 0 ]]; do
+  option="$1"
+  case $option in
+    --encrypt|-e)
+      MODE="encrypt"
+      REC_FILE="$2"
+      FILE="$3"
+      shift
+      shift
+      ;;
+    --reencrypt|-re|-r)
+      MODE="re-encrypt"
+      REC_FILE="$2"
+      FILE="$3"
+      shift
+      shift
+      ;;
+    --reencrypt-all|-all|-a)
+      MODE="all-re-encrypt"
+      REC_FILE="$2"
+      shift
+      shift
+      ;;
+    --help|-h)
+      helptext
+      exit
+      ;;
+    *)
+      ARG+=("$1")
+      shift
+      ;;
+  esac
+done
+
+encrypt_file() {
+  filename="$(basename "$2")"
+  cmd="gpg --batch --yes -q --output ""$3"/"$filename".gpg" -e "$1" "$2" "
+  eval "$cmd"
+}
+
+decrypt_file() {
+  filename=$(basename "$1" .gpg)
+  cmd="gpg -q -d "$1">"$2"/"$filename""
+  eval "$cmd"
+}
+
+uid_filter() {
+  grep uid | sed -e 's/.*<\(.*\)>/\1/' | grep $1
+}
+
+# loop through recipients to concatenate them together 
+while read recipient ; do
+  if [ ! -z "$recipient" ]; then
+    # check for recipient in users keychain
+    cmd="$(gpg --list-key | uid_filter $recipient)"
+    if [ -z "$cmd" ]; then
+      echo "$recipient is not in your keychain yet. \
+      Please import the public key before continuing."
+      exit
+    fi
+    recipients=""$recipients" -r "$recipient""
+  fi
+done < "$REC_FILE"
+
+[[ ! -d "$PWD/archive" ]] && mkdir "$PWD/archive"
+
+if [[ "$MODE" == "encrypt" ]]; then
+  [[ -z "$FILE" ]] && echo "please select file for encryption" && exit
+  [[ ! -f "$FILE" ]] && echo "$FILE does not exist" && exit
+
+  echo "Recipient argument:    $recipients"
+
+  eval "$(encrypt_file "$recipients" "$FILE" "$PWD")"
+  echo "Encryption completed."
+  read -p "Do you want to keep the unencrypted, plaintext file? (y/n)" choice
+      case "$choice" in 
+        y|Y ) ;;
+        n|N ) rm "$FILE" && echo "$FILE deleted." ;;
+        * ) rm "$FILE" && echo "$FILE deleted." ;;
+      esac
+
+      if [[ $choice == "y" ]] || [[ $choice == "Y" ]]; then
+        echo "==============================================="
+        echo "= DO NOT FORGET TO DELETE THE PLAINTEXT FILE! ="
+        echo "==============================================="
+      fi
+elif [[ "$MODE" == "re-encrypt" ]]; then
+  [[ -z "$FILE" ]] && echo "please select file for encryption" && exit
+  [[ ! -f "$FILE" ]] && echo "$FILE does not exist." && exit
+  echo "Recipient argument:    $recipients"
+
+  # # creates temp dir to store decrypted files inside
+  dir=`mktemp -d -p "$PWD"`
+
+  # creates subdir to archive old gpg files
+  ts="$(date +%Y%m%d%H%M%S)"
+  archive=""$PWD"/archive/"$ts""
+  mkdir "$archive"
+  echo "Archive folder created: "$archive""
+
+  # loops through gpg files and decrypts them into temp directory
+  eval "$(decrypt_file "$FILE" "$dir")"
+  mv "$FILE" "$archive"
+
+  # loops through all files in temp folder and reencrypts them with new
+  # recipient txt
+  for j in "$dir"/*; do
+    eval "$(encrypt_file "$recipients" "$j" "$PWD")"
+  done
+
+  # delete tmp dir
+  rm -rf "$dir"
+
+  echo "Reencryption completed."
+elif [[ "$MODE" == "all-re-encrypt" ]]; then
+  read -p "Are you sure you want to reencrypt all the \
+    files in this directory? (y/n)" choice
+      case "$choice" in 
+        y|Y ) ;;
+        n|N ) exit ;;
+        * ) exit ;;
+      esac
+
+  echo "Recipient argument:    $recipients"
+
+  # # creates temp dir to store decrypted files inside
+  dir=`mktemp -d -p "$PWD"`
+
+  # creates subdir to archive old gpg files
+  ts="$(date +%Y%m%d%H%M%S)"
+  archive=""$PWD"/archive/"$ts""
+  mkdir "$archive"
+  echo "Archive folder created: "$archive""
+
+  # loops through gpg files and decrypts them into temp directory
+  for i in *.gpg; do
+      [ -f "$i" ] || break
+      eval "$(decrypt_file "$i" "$dir")"
+      mv "$i" "$archive"
+  done
+
+  # loops through all files in temp folder and reencrypts them with new
+  # recipient txt
+  for j in "$dir"/*; do
+    eval "$(encrypt_file "$recipients" "$j" "$PWD")"
+  done
+
+  # delete tmp dir
+  rm -rf "$dir"
+
+  echo "Reencryption completed."
+fi
